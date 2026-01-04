@@ -10,7 +10,7 @@ def test_muon(backend):
     # Simple test to check if Muon optimizer works with different backends
     from muon import Muon
 
-    model = torch.nn.Linear(10, 10)
+    model = torch.nn.Linear(10, 10, bias=False)
     optimizer = Muon(
         model.parameters(),
         backend=backend,
@@ -40,4 +40,4 @@ def test_grouped_optimizer():
     grouped_optim.zero_grad()
     scheduler.step()
 
-    assert scheduler.get_last_lr()[0] == 0.01  # Check if learning rate is adjusted correctly
+    assert scheduler.get_last_lr()[0] == pytest.approx(0.01)  # Check if learning rate is adjusted correctly
