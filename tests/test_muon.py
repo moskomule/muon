@@ -22,4 +22,4 @@ def test_muon(backend):
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()
-    assert True
+    assert 1 == 1  # Dummy assertion to ensure the test runs without errors
