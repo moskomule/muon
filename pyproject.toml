@@ -24,9 +24,6 @@ dependencies = [
 ]
 dynamic = ["version"]
 
-[tool.hatch.envs.default.env-vars]
-PIP_EXTRA_INDEX_URL = "https://pypi.org/simple/"
-
 [project.urls]
 Documentation = "https://moskomule.github.io/muon"
 Issues = "https://github.com/moskomule/muon/issues"
@@ -42,14 +39,6 @@ dependencies = [
 
 [[tool.hatch.envs.test.matrix]]
 python = ["312", "313"]
-
-[tool.hatch.envs.docs]
-extra-dependencies = [
-    "mkdocs-material",
-    "mkdocstrings[python]"
-]
-[tool.hatch.envs.docs.scripts]
-build = "mkdocs build --clean --strict"
 
 [tool.hatch.build.targets.sdist]
 exclude = [
