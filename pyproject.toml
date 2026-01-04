@@ -32,17 +32,11 @@ Source = "https://github.com/moskomule/muon"
 [tool.hatch.version]
 path = "muon/__about__.py"
 
-[tool.hatch.envs.tests]
-dependencies = [
-    "pytest",
-]
+[[tool.hatch.envs.hatch-test.matrix]]
+python = ["3.12", "3.13"]
 
-[[tool.hatch.envs.test.matrix]]
-python = ["312", "313"]
+[tool.hatch.envs.hatch-test]
+installer = "uv"
 
-[tool.hatch.build.targets.sdist]
-exclude = [
-    "/.github",
-    "/docs",
-    "/tests",
-]
+[tool.hatch.envs.hatch-test.env-vars]
+UV_DEFAULT_URL = "https://download.pytorch.org/whl/cpu https://pypi.org/simple"
