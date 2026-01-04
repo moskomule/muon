@@ -4,16 +4,17 @@ from collections.abc import Callable, MutableMapping
 from functools import partial
 
 import torch
-from muons.orthogonalization import (
+from torch import Tensor
+from torch.distributed.tensor import DTensor
+from torch.optim._muon import _adjust_lr
+from torch.optim.optimizer import Optimizer, ParamsT
+
+from .orthogonalization import (
     NEWTON_SCHULZ_DEFAULT_COEFFICIENTS,
     POLAR_EXPRESS_DEFAULT_COEFFICIENTS,
     newton_schulz,
     polar_express,
 )
-from torch import Tensor
-from torch.distributed.tensor import DTensor
-from torch.optim._muon import _adjust_lr
-from torch.optim.optimizer import Optimizer, ParamsT
 
 SUPPORTED_BACKENDS = {
     "newton_schulz": newton_schulz,
