@@ -4,25 +4,19 @@ import numpy as np
 import torch
 from torch import Tensor
 
-# Newton-Schulz orthogonalization, adopted from PyTorch
-NEWTON_SCHULZ_DEFAULT_COEFFICIENTS = [(3.4445, -4.7750, 2.0315)]
 
-
-@torch.compile(fullgraph=True)
 def newton_schulz(
     grad: Tensor,
-    coefficients: list[tuple[float, float, float]] = NEWTON_SCHULZ_DEFAULT_COEFFICIENTS,
-    steps: int = 5,
+    coefficients: list[tuple[float, float, float]],
     eps: float = 1e-7,
+    safety_factor: float = 1e-2,
 ) -> Tensor:
     assert grad.dim() == 2, f"Input must be a 2D tensor, but got {grad.dim()}D tensor."
-    assert len(coefficients) == 1, "Only one set of coefficients is supported."
-    a, b, c = coefficients[0]
     ortho_grad = grad.bfloat16()
     if grad.size(0) > grad.size(1):
         ortho_grad = ortho_grad.T
-    ortho_grad.div_(ortho_grad.norm().clamp(min=eps))  # ensure spectral norm <= 1
-    for _ in range(steps):
+    ortho_grad.div_(ortho_grad.norm() * (1 + safety_factor) + eps)  # ensure spectral norm <= 1
+    for a, b, c in coefficients:
         gram_mat = ortho_grad @ ortho_grad.mT
         # addmm(A, B, C, beta, alpha=1) computes beta * A + alpha * (B @ C)
         # so, gram_update <- b * G^2 + c * G^4
@@ -32,6 +26,13 @@ def newton_schulz(
     if grad.size(0) > grad.size(1):
         ortho_grad = ortho_grad.T
     return ortho_grad.to(grad.dtype)
+
+
+def newton_schulz_coefficients(
+    steps: int,
+) -> list[tuple[float, float, float]]:
+    # Newton-Schulz orthogonalization, adopted from PyTorch's implementation
+    return [(3.4445, -4.7750, 2.0315) for _ in range(steps)]
 
 
 # Polar-Express Sign Method, adopted from https://github.com/NoahAmsel/PolarExpress
@@ -79,7 +80,7 @@ def obj(
     return local_min / local_argmin - target_slope
 
 
-def optimal_composition(
+def polar_express_coefficients(
     l: float,
     num_iters: int,
     safety_factor_eps: float,
@@ -110,38 +111,3 @@ def optimal_composition(
         l = a * l + b * l**3 + c * l**5
         u = 2 - l
     return coefficients
-
-
-# Parameters are adopted from https://github.com/KellerJordan/modded-nanogpt
-POLAR_EXPRESS_DEFAULT_COEFFICIENTS = optimal_composition(
-    l=1e-3,
-    num_iters=5,
-    safety_factor_eps=1e-2,
-    cushion=0.01,
-)
-
-
-@torch.compile(fullgraph=True)
-def polar_express(
-    grad: Tensor,
-    coefficients: list[tuple[float, float, float]],
-    steps: int,
-    eps: float,
-    safety_factor: float = 2e-2,
-) -> Tensor:
-    assert grad.dim() == 2, "Input must be a 2D tensor."
-    assert len(coefficients) == steps, "Number of coefficient sets must equal number of steps."
-
-    ortho_grad = grad.bfloat16()
-    if grad.size(0) > grad.size(1):
-        ortho_grad = ortho_grad.T
-    ortho_grad.div_(ortho_grad.norm() * (1 + safety_factor) + eps)
-
-    for a, b, c in coefficients:
-        gram_mat = ortho_grad @ ortho_grad.mT
-        gram_update = torch.addmm(gram_mat, gram_mat, gram_mat, beta=b, alpha=c)
-        ortho_grad = torch.addmm(ortho_grad, gram_update, ortho_grad, beta=a)
-        
-    if grad.size(0) > grad.size(1):
-        ortho_grad = ortho_grad.T
-    return ortho_grad.to(grad.dtype)

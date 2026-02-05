@@ -1,7 +1,8 @@
 import dataclasses
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable, MutableMapping
 from functools import partial
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -10,20 +11,14 @@ from torch.optim._muon import _adjust_lr
 from torch.optim.optimizer import Optimizer, ParamsT
 
 from .orthogonalization import (
-    NEWTON_SCHULZ_DEFAULT_COEFFICIENTS,
-    POLAR_EXPRESS_DEFAULT_COEFFICIENTS,
     newton_schulz,
-    polar_express,
+    newton_schulz_coefficients,
+    polar_express_coefficients,
 )
 
-SUPPORTED_BACKENDS = {
-    "newton_schulz": newton_schulz,
-    "polar_express": polar_express,
-}
-
 DEFAULT_COEFFICIENTS = {
-    "newton_schulz": NEWTON_SCHULZ_DEFAULT_COEFFICIENTS,
-    "polar_express": POLAR_EXPRESS_DEFAULT_COEFFICIENTS,
+    "newton_schulz": newton_schulz_coefficients,
+    "polar_express": polar_express_coefficients,
 }
 
 
@@ -41,7 +36,8 @@ class Muon(Optimizer):
         eps: float = 1e-7,
         steps: int = 5,
         adjust_lr_fn: str | None = None,
-        backend: str | None = None,
+        backend: Literal["newton_schulz", "polar_express"] = "newton_schulz",
+        compile: bool = True,  # Whether to compile the orthogonalization function
     ) -> None:
         if isinstance(lr, Tensor) and lr.numel() != 1:
             raise ValueError("Tensor lr must be 1-element")
@@ -53,30 +49,52 @@ class Muon(Optimizer):
             raise ValueError(f"weight decay should be >= 0 but is: {weight_decay}")
         if adjust_lr_fn is not None and adjust_lr_fn not in ["original", "match_rms_adamw"]:
             raise ValueError(f"Adjust learning rate function {adjust_lr_fn} is not supported")
-        if backend is not None and backend not in ["newton_schulz", "polar_express"]:
+        if backend not in ["newton_schulz", "polar_express"]:
             raise ValueError(f"Implementation {backend} is not supported")
         if coefficients is None:
-            coefficients = DEFAULT_COEFFICIENTS[backend]
+            if backend == "newton_schulz":
+                coefficients = DEFAULT_COEFFICIENTS["newton_schulz"](steps)
+            elif backend == "polar_express":
+                coefficients = DEFAULT_COEFFICIENTS["polar_express"](
+                    l=1e-3, num_iters=steps, safety_factor_eps=1e-2, cushion=0.01
+                )
+
+        # force params: list[dict[str, Any]]
+        params = list(params)
+        if isinstance(params[0], Tensor):
+            params = [{"params": params}]
+
+        # group params by their size
+        # e.g., [{"params": [...], "size": (128, 64), **kwargs}, {"params": [...], "size": (64, 32), **kwargs}]
+
+        _params = []
+        for group in params:
+            size_to_group = defaultdict(list)
+            for p in group["params"]:
+                size = p.size()
+                if len(size) != 2:
+                    raise ValueError(f"Muon only supports 2D parameters whereas we found a parameter with size: {size}")
+                size_to_group[size].append(p)
+            for size, p_list in size_to_group.items():
+                _params.append({**group, "params": p_list, "size": size})
 
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
             "momentum": momentum,
             "nesterov": nesterov,
-            "coefficients": coefficients,
             "eps": eps,
-            "steps": steps,
             "adjust_lr_fn": adjust_lr_fn,
-            "implementation": backend,
         }
-        super().__init__(params, defaults)
 
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.ndim != 2:
-                    raise ValueError(
-                        f"Muon only supports 2D parameters whereas we found a parameter with size: {p.size()}"
-                    )
+        super().__init__(_params, defaults)
+
+        self.orthogonalization = partial(
+            newton_schulz,
+            coefficients=coefficients,
+            eps=eps,
+        )
+        self.compile = compile
 
     def _init_group(
         self,
@@ -114,15 +132,11 @@ class Muon(Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
+            # each group has same size params
+
             lr = group["lr"]
             weight_decay = group["weight_decay"]
             momentum = group["momentum"]
-            orthogonalization = partial(
-                SUPPORTED_BACKENDS[group["implementation"]],
-                coefficients=group["coefficients"],
-                steps=group["steps"],
-                eps=group["eps"],
-            )
 
             params_with_grad: list[Tensor] = []
             grads: list[Tensor] = []
@@ -152,7 +166,11 @@ class Muon(Optimizer):
                             weight_decay,
                             group["nesterov"],
                             group["adjust_lr_fn"],
-                            orthogonalization,
+                            torch.compile(
+                                self.orthogonalization,
+                                disable=not self.compile,
+                                fullgraph=True,
+                            ),
                             index=i,
                         )
                     )
@@ -163,18 +181,24 @@ class Muon(Optimizer):
                     result.wait()
 
             else:
-                for i, param in enumerate(params_with_grad):
-                    MuonResult(
-                        param,
-                        grads[i],
-                        muon_momentum_bufs[i],
-                        lr,
-                        momentum,
-                        weight_decay,
-                        group["nesterov"],
-                        group["adjust_lr_fn"],
-                        orthogonalization,
-                    ).wait()
+                stacked_params = torch.stack(params_with_grad)
+                MuonResult(
+                    stacked_params,
+                    torch.stack(grads),
+                    torch.stack(muon_momentum_bufs),
+                    lr,
+                    momentum,
+                    weight_decay,
+                    group["nesterov"],
+                    group["adjust_lr_fn"],
+                    torch.compile(
+                        torch.vmap(self.orthogonalization),
+                        disable=not self.compile,
+                        fullgraph=True,
+                    ),
+                ).wait()
+
+                torch._foreach_copy_(params_with_grad, stacked_params.unbind())
 
         return loss
 
@@ -231,13 +255,11 @@ class DMuonResult(MuonResult):
         self.dist_info = (rank, world_size, pg, dest_rank)
 
     def wait(self) -> None:
-
         rank, world_size, pg, dest_rank = self.dist_info
         self.gather_handle.wait()
         if rank == dest_rank:
             full_grad = torch.cat(self.gather_list, dim=0)
             full_grad.copy_(self.orthogonalization(full_grad))
-            full_grad = full_grad.type_as(self.grad)
             chunks = list(full_grad.chunk(world_size, dim=0))
         else:
             chunks = None
